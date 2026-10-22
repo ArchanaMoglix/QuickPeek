@@ -32,16 +32,16 @@ const RESTRICTED =
 export async function getPageContent(): Promise<PageContent> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
 
-  if (!tab?.id || !tab.url) throw new Error('No active tab found');
-  if (RESTRICTED.test(tab.url)) {
-    throw new Error('This is internal page of the browser, QuickPeek has no access to this.');
-  }
+if (!tab?.id || !tab.url) throw new Error('No active tab found.');
+if (RESTRICTED.test(tab.url)) {
+  throw new Error('This is a browser internal page; the extension cannot read it.');
+}
 
   const [res] = await browser.scripting.executeScript({
     target: { tabId: tab.id },
     func: extractPage,
   });
 
-  if (!res?.result) throw new Error('Page content not found.');
+ if (!res?.result) throw new Error('Could not read the page content.');
   return res.result as PageContent;
 }
