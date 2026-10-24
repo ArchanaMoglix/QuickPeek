@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
-import { askAssistant, type Message } from '@/lib/api';
+import { askAssistant, type Message, type ModelKind } from '@/lib/api';
 import { getPageContent } from '@/lib/extract';
+import { captureScreenshot } from '@/lib/screenshot';
+import { getExtraImages } from '@/lib/images';
+import { clearSource, showSource, type AnswerSource } from '@/lib/highlight';
+import type { AgentStep, RunView } from '@/lib/agent/types';
+import {
+  agentKey,
+  chatKey,
+  emptyAgent,
+  emptyChat,
+  type AgentState,
+  type BgMessage,
+  type ChatState,
+  type Mode,
+} from '@/lib/session';
 import {
   canListen,
   canSpeak,
@@ -27,6 +41,40 @@ const SpeakerIcon = () => (
   </svg>
 );
 
+const PinIcon = () => (
+  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21z" />
+    <circle cx="12" cy="9.5" r="2.5" />
+  </svg>
+);
+
+// Agent ke chhote actions (Click, Type...)
+const ActionList = ({ steps }: { steps: AgentStep[] }) => (
+  <ul className="steps">
+    {steps.map((s, i) => (
+      <li key={i} className={s.result.startsWith('error') ? 'failed' : ''}>
+        {s.summary}
+        {s.result.startsWith('error') && <small>{s.result.replace(/^error: /, '')}</small>}
+      </li>
+    ))}
+  </ul>
+);
+
+// Plan ka step: ho gaya / chal raha / baaki
+function planState(run: RunView, n: number): 'done' | 'active' | 'current' | 'todo' {
+  const current = run.planStep ?? 1;
+  if (run.status === 'done' || n < current) return 'done';
+  if (n === current) return run.status === 'running' ? 'active' : 'current';
+  return 'todo';
+}
+
+const EyeIcon = () => (
+  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
 const SpeakerOffIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M11 5 6 9H2v6h4l5 4V5z" />
@@ -34,29 +82,121 @@ const SpeakerOffIcon = () => (
   </svg>
 );
 
+const CursorIcon = () => (
+  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m4 4 7 17 2.5-7.5L21 11z" />
+  </svg>
+);
+
+const RUN_LABEL: Record<RunView['status'], string> = {
+  running: 'Working on it',
+  done: 'Done',
+  ask_user: 'Needs your input',
+  stopped: 'Stopped',
+  error: "Couldn't finish",
+};
+
+// Overlay card mein khula hai to URL mein tabId aata hai; side panel (fallback) mein nahi
+const URL_TAB_ID = Number(new URLSearchParams(location.search).get('tabId')) || null;
+const IN_OVERLAY = URL_TAB_ID !== null;
+const NEW_RUN: RunView = { status: 'running', activity: 'Starting…', steps: [] };
+
+const sendToBackground = (msg: BgMessage) => browser.runtime.sendMessage(msg).catch(console.error);
+
 function App() {
+  const [tabId, setTabId] = useState<number | null>(URL_TAB_ID);
+  const [loaded, setLoaded] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [sourceMissing, setSourceMissing] = useState<Set<string>>(new Set()); // 'Show on page' fail hua
+  const [mode, setMode] = useState<Mode>('ask');
+  const [agent, setAgent] = useState<AgentState>(emptyAgent()); // background agent ki halat
+  const [announced, setAnnounced] = useState<string[]>([]);
   const [listening, setListening] = useState(false);
   const [speakerOn, setSpeakerOn] = useState(false); // jawab bol ke sunana: default band
   const speakerOnRef = useRef(false);
   const [voiceError, setVoiceError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const modeRef = useRef<Mode>('ask');
+
+  const agentRunning = Object.values(agent.runs).some((r) => r.run.status === 'running');
+  const busy = loading || agentRunning;
+
+  // Side panel (fallback) mein tabId URL mein nahi hota: abhi wala tab
+  useEffect(() => {
+    if (tabId !== null) return;
+    browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (tab?.id) setTabId(tab.id);
+    });
+  }, [tabId]);
+
+  // Is tab ki purani chat aur agent ki halat wapas lao (page badalne pe overlay naya banta hai)
+  useEffect(() => {
+    if (tabId === null) return;
+    const ck = chatKey(tabId);
+    const ak = agentKey(tabId);
+    browser.storage.session.get([ck, ak]).then((stored) => {
+      const chat = (stored[ck] as ChatState | undefined) ?? emptyChat();
+      setMessages(chat.messages);
+      setMode(chat.mode);
+      modeRef.current = chat.mode;
+      setSpeakerOn(chat.speakerOn);
+      speakerOnRef.current = chat.speakerOn;
+      setAnnounced(chat.announced);
+      setAgent((stored[ak] as AgentState | undefined) ?? emptyAgent());
+      setLoaded(true);
+    });
+    // Agent background mein chalta hai: uske har step pe yahan update
+    const onChange = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+      if (area === 'session' && changes[ak]) setAgent((changes[ak].newValue as AgentState) ?? emptyAgent());
+    };
+    browser.storage.onChanged.addListener(onChange);
+    return () => browser.storage.onChanged.removeListener(onChange);
+  }, [tabId]);
+
+  // Chat save karo, taaki page badalne pe wapas aaye
+  useEffect(() => {
+    if (!loaded || tabId === null) return;
+    const chat: ChatState = { messages, mode, speakerOn, announced };
+    browser.storage.session.set({ [chatKey(tabId)]: chat }).catch(console.error);
+  }, [loaded, tabId, messages, mode, speakerOn, announced]);
+
+  // Agent ka kaam khatam: speaker on ho to nateeja bol ke sunao (ek hi baar)
+  useEffect(() => {
+    if (!loaded) return;
+    const finished = messages
+      .map((m) => m.runId)
+      .filter((id): id is string => !!id && !announced.includes(id))
+      .filter((id) => agent.runs[id] && agent.runs[id].run.status !== 'running');
+    if (!finished.length) return;
+    setAnnounced((prev) => [...prev, ...finished]);
+    const last = agent.runs[finished[finished.length - 1]!];
+    if (speakerOnRef.current && canSpeak && last?.content) speak(last.content);
+  }, [loaded, agent, messages, announced]);
 
   // Naya message aane pe neeche scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+  }, [messages, loading, agent]);
 
-  // Panel band ho to mic aur awaaz dono band
+  // Widget band ho to mic aur awaaz band (agent background mein hai, use close button rokta hai)
   useEffect(() => {
     return () => {
       recognitionRef.current?.stop();
       if (canSpeak) stopSpeaking();
     };
   }, []);
+
+  function changeMode(next: Mode) {
+    setMode(next);
+    modeRef.current = next;
+  }
+
+  function contentOf(m: Message): string {
+    return m.runId ? agent.runs[m.runId]?.content ?? '' : m.content;
+  }
 
   function toggleSpeaker() {
     const on = !speakerOn;
@@ -65,35 +205,89 @@ function App() {
 
     if (!on) return stopSpeaking();
     // On karte hi aakhri jawab suna do
-    const last = [...messages].reverse().find((m) => m.role === 'assistant');
-    if (last) speak(last.content);
+    const last = [...messages].reverse().find((m) => m.role === 'assistant' && contentOf(m));
+    if (last) speak(contentOf(last));
   }
 
-  async function send(text = input, fromVoice = false) {
-    const question = text.trim();
-    if (!question || loading) return;
+  function addMessage(msg: Omit<Message, 'id'>): string {
+    const id = crypto.randomUUID();
+    setMessages((prev) => [...prev, { ...msg, id }]);
+    return id;
+  }
 
-    setMessages((prev) => [
-      ...prev,
-      { id: crypto.randomUUID(), role: 'user', content: question, voice: fromVoice },
-    ]);
-    setInput('');
+  // ---------- Ask mode ----------
+
+  async function ask(question: string) {
     setLoading(true);
-
     let answer: string;
+    let model: ModelKind | undefined;
+    let source: AnswerSource | undefined;
     try {
-      const page = await getPageContent(); // har sawaal pe fresh page padho
-      answer = await askAssistant(question, page);
+      // Har sawaal pe fresh page text + screenshot; server tay karega kaunsa model use ho
+      // Pichhle jawab ka highlight hatao, warna screenshot mein peela dikhega
+      await clearSource();
+      const [page, screenshot] = await Promise.all([getPageContent(), captureScreenshot()]);
+      // Sawaal screen ke bahar wali kisi image ke baare mein ho to uski file bhi bhejo
+      const extraImages = await getExtraImages(question, page.images);
+      // source: jawab page pe kahan hai. "Show on page" button dabane pe hi wahan le jaate hain
+      ({ answer, model, source } = await askAssistant(question, page, screenshot, extraImages));
     } catch (err) {
       answer = err instanceof Error ? err.message : 'Something went wrong. Try again.';
     } finally {
       setLoading(false);
     }
 
-    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: answer }]);
-
+    addMessage({ role: 'assistant', content: answer, model, source });
     // Speaker on hai to jawab bol ke sunao (ref: voice se aaye send mein bhi latest value mile)
     if (speakerOnRef.current && canSpeak) speak(answer);
+  }
+
+  // "Show on page": jawab wale hisse tak scroll karke peela highlight
+  async function goToSource(id: string, source: AnswerSource) {
+    const found = await showSource(source);
+    setSourceMissing((prev) => {
+      const next = new Set(prev);
+      if (found) next.delete(id);
+      else next.add(id); // user doosre page/tab pe chala gaya
+      return next;
+    });
+  }
+
+  // ---------- Do mode (agent, background mein chalta hai) ----------
+
+  function doTask(instruction: string) {
+    if (tabId === null) {
+      addMessage({ role: 'assistant', content: 'No active tab found.' });
+      return;
+    }
+    const runId = crypto.randomUUID();
+    setMessages((prev) => [...prev, { id: runId, role: 'assistant', content: '', runId }]);
+    sendToBackground({ type: 'qp:agent:start', tabId, runId, instruction });
+  }
+
+  function answerConfirm(ok: boolean) {
+    if (tabId !== null) sendToBackground({ type: 'qp:agent:confirm', tabId, ok });
+  }
+
+  function stopAgent() {
+    if (tabId !== null) sendToBackground({ type: 'qp:agent:stop', tabId });
+  }
+
+  function closeWidget() {
+    if (tabId !== null) sendToBackground({ type: 'qp:overlay:close', tabId });
+  }
+
+  // ---------- Common ----------
+
+  async function send(text = input, fromVoice = false) {
+    const question = text.trim();
+    if (!question || loading || agentRunning) return;
+
+    addMessage({ role: 'user', content: question, voice: fromVoice });
+    setInput('');
+
+    if (modeRef.current === 'do') doTask(question);
+    else await ask(question);
   }
 
   async function toggleMic() {
@@ -127,23 +321,93 @@ function App() {
     });
   }
 
+  const placeholder = listening
+    ? 'Listening…'
+    : mode === 'do'
+      ? agent.pending
+        ? "Answer Quick Peek's question…"
+        : 'Tell me what to do on this page…'
+      : 'Enter your query here.';
+
   return (
     <div className="app">
-      <header className="header">Quick Peek</header>
+      <header className="header">
+        <span className="header-title">Quick Peek</span>
+        {IN_OVERLAY && (
+          <button className="close-btn" onClick={closeWidget} aria-label="Close Quick Peek" title="Close">
+            ×
+          </button>
+        )}
+      </header>
 
       <main className="messages">
         {messages.length === 0 && (
           <p className="empty">
-            Ask anything about this page.
+            {mode === 'do'
+              ? <>Tell me what to do on this page.<br />e.g. “Search for wireless mouse”</>
+              : 'Ask anything about this page.'}
             {canListen && <><br />Type, or tap the mic to speak.</>}
           </p>
         )}
-        {messages.map((m) => (
-          <div key={m.id} className={`bubble ${m.role}`}>
-            {m.voice && <span className="voice-tag"><MicIcon /> Voice</span>}
-            {m.content}
-          </div>
-        ))}
+        {messages.map((m) => {
+          if (m.runId) {
+            const rec = agent.runs[m.runId];
+            const run = rec?.run ?? NEW_RUN; // background ne abhi likha nahi
+            return (
+              <div key={m.id} className={`bubble assistant run ${run.status}`}>
+                <span className="voice-tag"><CursorIcon /> {RUN_LABEL[run.status]}</span>
+                {run.plan ? (
+                  <ol className="plan">
+                    {run.plan.map((p, i) => {
+                      const n = i + 1;
+                      const state = planState(run, n);
+                      const actions = run.steps.filter((s) => (s.planStep ?? 1) === n);
+                      return (
+                        <li key={i} className={`plan-step ${state}`}>
+                          <span className="plan-mark">{state === 'done' ? '✓' : state === 'active' ? '' : n}</span>
+                          <div className="plan-body">
+                            <span className="plan-text">{p}</span>
+                            {actions.length > 0 && <ActionList steps={actions} />}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                ) : (
+                  run.steps.length > 0 && <ActionList steps={run.steps} />
+                )}
+                {run.status === 'running' && !run.confirm && (
+                  <div className="activity"><span className="spinner" /> {run.activity}</div>
+                )}
+                {run.confirm && (
+                  <div className="confirm">
+                    <p>Allow Quick Peek to <strong>{run.confirm}</strong>?</p>
+                    <div className="confirm-actions">
+                      <button className="allow-btn" onClick={() => answerConfirm(true)}>Allow</button>
+                      <button className="deny-btn" onClick={() => answerConfirm(false)}>Deny</button>
+                    </div>
+                  </div>
+                )}
+                {rec?.content && <div className="run-result">{rec.content}</div>}
+                {run.status === 'running' && (
+                  <button className="stop-btn" onClick={stopAgent}>Stop</button>
+                )}
+              </div>
+            );
+          }
+          return (
+            <div key={m.id} className={`bubble ${m.role}`}>
+              {m.voice && <span className="voice-tag"><MicIcon /> Voice</span>}
+              {m.model === 'vision' && <span className="voice-tag"><EyeIcon /> Looked at the screen</span>}
+              {m.content}
+              {m.source && (
+                <button className="source-btn" onClick={() => goToSource(m.id, m.source!)}>
+                  <PinIcon /> {sourceMissing.has(m.id) ? "Couldn't find it on this page" : 'Show on page'}
+                </button>
+              )}
+            </div>
+          );
+        })}
         {loading && <div className="bubble assistant">Thinking…</div>}
         <div ref={bottomRef} />
       </main>
@@ -165,7 +429,7 @@ function App() {
               send();
             }
           }}
-          placeholder={listening ? 'Listening…' : 'Enter your query here.'}
+          placeholder={placeholder}
           readOnly={listening}
           rows={2}
         />
@@ -174,7 +438,7 @@ function App() {
             <button
               className={`icon-btn ${listening ? 'listening' : ''}`}
               onClick={toggleMic}
-              disabled={loading}
+              disabled={busy}
               aria-label={listening ? 'Stop listening' : 'Speak your question'}
               title={listening ? 'Stop listening' : 'Speak your question'}
             >
@@ -192,7 +456,27 @@ function App() {
               {speakerOn ? <SpeakerIcon /> : <SpeakerOffIcon />}
             </button>
           )}
-          <button className="send-btn" onClick={() => send()} disabled={loading || listening || !input.trim()}>
+          <div className="mode-switch" role="group" aria-label="Mode">
+            <button
+              className={mode === 'ask' ? 'active' : ''}
+              onClick={() => changeMode('ask')}
+              disabled={agentRunning}
+              aria-pressed={mode === 'ask'}
+              title="Ask questions about this page"
+            >
+              Ask
+            </button>
+            <button
+              className={mode === 'do' ? 'active' : ''}
+              onClick={() => changeMode('do')}
+              disabled={agentRunning}
+              aria-pressed={mode === 'do'}
+              title="Let Quick Peek click and type on this page"
+            >
+              Do
+            </button>
+          </div>
+          <button className="send-btn" onClick={() => send()} disabled={busy || listening || !input.trim()}>
             Send
           </button>
         </div>
