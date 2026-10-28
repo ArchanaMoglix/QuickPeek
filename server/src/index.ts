@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { askTextModel, askVisionModel, chooseModel, visionEnabled, type ExtraImage } from './llm.js';
-import { makePlan, nextAgentStep, type AgentStepInput, type PlanInput } from './agent.js';
+import { makePlan, nextAgentStep, replan, type AgentStepInput, type PlanInput, type ReplanInput } from './agent.js';
 
 interface AskBody {
   question: string;
@@ -38,6 +38,7 @@ const askSchema = {
           url: { type: 'string' },
           text: { type: 'string' },
           selection: { type: 'string' },
+          html: { type: 'string', maxLength: 40000 },
           imageCoverage: { type: 'number', minimum: 0, maximum: 1 },
           images: {
             type: 'array',
@@ -95,6 +96,7 @@ const agentStepSchema = {
       },
       plan: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 300 } },
       changes: { type: 'string', maxLength: 2000 },
+      note: { type: 'string', maxLength: 1000 },
       observation: {
         type: 'object',
         required: ['url', 'title', 'scroll', 'visibleText', 'elements'],
@@ -111,6 +113,32 @@ const agentStepSchema = {
         },
       },
       screenshot: { type: 'string', pattern: '^data:image/(jpeg|png|webp);base64,', maxLength: 4000000 },
+    },
+  },
+};
+
+const agentReplanSchema = {
+  body: {
+    type: 'object',
+    required: ['goal', 'plan', 'planStep', 'reason', 'history', 'url', 'title'],
+    properties: {
+      goal: { type: 'string', minLength: 1, maxLength: 4000 },
+      plan: { type: 'array', minItems: 1, maxItems: 12, items: { type: 'string', maxLength: 300 } },
+      planStep: { type: 'integer', minimum: 1, maximum: 20 },
+      reason: { type: 'string', maxLength: 500 },
+      history: {
+        type: 'array',
+        maxItems: 50,
+        items: {
+          type: 'object',
+          required: ['summary', 'result'],
+          properties: { summary: { type: 'string' }, result: { type: 'string' }, planStep: { type: 'integer' } },
+        },
+      },
+      url: { type: 'string', maxLength: 4000 },
+      title: { type: 'string', maxLength: 1000 },
+      visibleText: { type: 'string', maxLength: 20000 },
+      elements: { type: 'array', maxItems: 300, items: { type: 'string', maxLength: 1000 } },
     },
   },
 };
@@ -208,7 +236,20 @@ app.register(
       }
     });
 
-    // Agent ("Do" mode): agla ek action
+    // Agent ("Do" mode): beech mein progress check, plan sudhaaro
+    api.post<{ Body: ReplanInput }>('/agent/replan', { schema: agentReplanSchema }, async (req, reply) => {
+      const started = Date.now();
+      try {
+        const result = await replan(req.body);
+        req.log.info({ reason: req.body.reason, steps: result.steps.length, current: result.current, note: result.note, ms: Date.now() - started }, 'agent replan');
+        return result;
+      } catch (err) {
+        req.log.warn(err, 'agent replan failed');
+        return reply.code(502).send({ error: 'replan failed' });
+      }
+    });
+
+    // Agent ("Do" mode): agla action (ya 2–3 actions)
     api.post<{ Body: AgentStepInput }>('/agent/step', { schema: agentStepSchema }, async (req, reply) => {
       const { observation, history, screenshot } = req.body;
       req.log.info(
@@ -218,11 +259,13 @@ app.register(
       try {
         const started = Date.now();
         const decision = await nextAgentStep(req.body, req.log);
-        req.log.info({ action: decision.action.type, step: decision.step, model: decision.model, ms: Date.now() - started }, 'agent decided');
+        req.log.info({ actions: decision.actions.map((a) => a.type), step: decision.step, model: decision.model, ms: Date.now() - started }, 'agent decided');
         return decision;
       } catch (err) {
         req.log.error(err, 'agent step failed');
-        return reply.code(502).send({ error: "The AI model couldn't decide the next step." });
+        // Wajah bhi bhejo (jaise "model unreachable: Connection error"), taaki chat mein dikhe
+        const reason = err instanceof Error ? err.message.slice(0, 200) : '';
+        return reply.code(502).send({ error: `The AI model couldn't decide the next step.${reason ? ` (${reason})` : ''}` });
       }
     });
 

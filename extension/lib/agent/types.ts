@@ -3,6 +3,7 @@
 export type AgentAction =
   | { type: 'click'; id: number }
   | { type: 'hover'; id: number }
+  | { type: 'inspect'; id: number } // element ka asli HTML (class, id, attributes) padho
   | { type: 'type'; id: number; text: string; submit?: boolean }
   | { type: 'select'; id: number; option: string }
   | { type: 'press'; key: string }
@@ -18,9 +19,10 @@ export interface ElementInfo {
   id: number;
   line: string; // model ke liye ek line ka description
   label: string; // user ko dikhane ke liye chhota naam
+  context?: string; // kis card ka hai (jaise "ADD" kis product ka), chhota
   secret: boolean; // password / card / OTP field: kabhi type nahi karna
   risky: boolean; // buy, pay, delete, send... : pehle user se poochho
-  searchish: boolean; // search box: Enter dabana safe hai
+  enterSafe: boolean; // type karke Enter dabana safe hai (search/filter); message box, login/payment form pe nahi
 }
 
 export interface Observation {
@@ -29,6 +31,17 @@ export interface Observation {
   scroll: string; // "top of page" / "40% down" ...
   visibleText: string;
   elements: ElementInfo[];
+  // Screenshot pe number wale boxes banane ke liye (viewport ke CSS px mein). Server ko nahi bhejte
+  marks?: Mark[];
+  viewportWidth?: number;
+}
+
+export interface Mark {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface AgentStep {

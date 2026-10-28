@@ -79,6 +79,7 @@ export async function askAssistant(
 export interface AgentDecision {
   thought: string;
   action: AgentAction;
+  actions?: AgentAction[]; // 1–3 actions (pehla = action); purana server sirf action bhejta hai
   step?: number; // plan ka kaunsa step
   model: ModelKind;
 }
@@ -114,6 +115,7 @@ export async function askAgentStep(
     observation: Observation;
     screenshot: string | null;
     changes?: string; // pichhle action ke baad screen pe kya naya aaya
+    note?: string; // planner ki salaah
   },
   signal?: AbortSignal,
 ): Promise<AgentDecision> {
@@ -135,4 +137,41 @@ export async function askAgentStep(
     throw new Error(data?.error ?? `Server error: ${res.status}`);
   }
   return (await res.json()) as AgentDecision;
+}
+
+// Beech mein progress check: planner plan sudhaarta hai aur ek salaah deta hai.
+// Fail ho to null (agent purane plan se chalta rahe)
+export async function askAgentReplan(
+  body: {
+    goal: string;
+    plan: string[];
+    planStep: number;
+    reason: string;
+    history: { summary: string; result: string; planStep?: number }[];
+    url: string;
+    title: string;
+    visibleText?: string;
+    elements?: string[];
+  },
+  signal?: AbortSignal,
+): Promise<{ steps: string[]; current: number; note: string } | null> {
+  try {
+    const res = await fetch(`${API_URL}/agent/replan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...body,
+        history: body.history.slice(-50).map(({ summary, result, planStep }) => ({ summary, result, planStep })),
+        visibleText: body.visibleText?.slice(0, 20000),
+        elements: body.elements?.slice(0, 300).map((l) => l.slice(0, 1000)),
+      }),
+      signal,
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { steps?: string[]; current?: number; note?: string };
+    return data.steps?.length ? { steps: data.steps, current: data.current ?? 1, note: data.note ?? '' } : null;
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return null;
+  }
 }

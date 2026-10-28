@@ -27,6 +27,12 @@ import {
 } from '@/lib/speech';
 import './App.css';
 
+const TrashIcon = () => (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6" />
+  </svg>
+);
+
 const MicIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="9" y="2" width="6" height="12" rx="3" />
@@ -118,11 +124,16 @@ function App() {
   const speakerOnRef = useRef(false);
   const [voiceError, setVoiceError] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
   const modeRef = useRef<Mode>('ask');
+  // Bheja gaya sawaal jo abhi chala nahi: user pehle chunega Ask hai ya Do
+  const [choosing, setChoosing] = useState<string | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false); // "Clear chat?" dikh raha hai (dusre click pe clear)
+  const clearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const agentRunning = Object.values(agent.runs).some((r) => r.run.status === 'running');
-  const busy = loading || agentRunning;
+  const busy = loading || agentRunning || choosing !== null;
 
   // Side panel (fallback) mein tabId URL mein nahi hota: abhi wala tab
   useEffect(() => {
@@ -176,6 +187,13 @@ function App() {
     if (speakerOnRef.current && canSpeak && last?.content) speak(last.content);
   }, [loaded, agent, messages, announced]);
 
+  // Kaam khatam: input box phir se chalu, cursor wahin rakho
+  const wasBusy = useRef(false);
+  useEffect(() => {
+    if (wasBusy.current && !busy) inputRef.current?.focus();
+    wasBusy.current = busy;
+  }, [busy]);
+
   // Naya message aane pe neeche scroll
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -226,7 +244,7 @@ function App() {
       // Har sawaal pe fresh page text + screenshot; server tay karega kaunsa model use ho
       // Pichhle jawab ka highlight hatao, warna screenshot mein peela dikhega
       await clearSource();
-      const [page, screenshot] = await Promise.all([getPageContent(), captureScreenshot()]);
+      const [page, screenshot] = await Promise.all([getPageContent(question), captureScreenshot()]);
       // Sawaal screen ke bahar wali kisi image ke baare mein ho to uski file bhi bhejo
       const extraImages = await getExtraImages(question, page.images);
       // source: jawab page pe kahan hai. "Show on page" button dabane pe hi wahan le jaate hain
@@ -273,6 +291,26 @@ function App() {
     if (tabId !== null) sendToBackground({ type: 'qp:agent:stop', tabId });
   }
 
+  // Pehla click: "Clear chat?" (3s). Dusra click: chat, agent runs aur page ka highlight sab saaf
+  function clearChat() {
+    if (!confirmClear) {
+      setConfirmClear(true);
+      clearTimer.current = setTimeout(() => setConfirmClear(false), 3000);
+      return;
+    }
+    if (clearTimer.current) clearTimeout(clearTimer.current);
+    setConfirmClear(false);
+    if (canSpeak) stopSpeaking();
+    clearSource().catch(() => {});
+    setMessages([]);
+    setAnnounced([]);
+    setSourceMissing(new Set());
+    setVoiceError('');
+    setChoosing(null);
+    setAgent(emptyAgent());
+    if (tabId !== null) sendToBackground({ type: 'qp:agent:clear', tabId });
+  }
+
   function closeWidget() {
     if (tabId !== null) sendToBackground({ type: 'qp:overlay:close', tabId });
   }
@@ -281,13 +319,38 @@ function App() {
 
   async function send(text = input, fromVoice = false) {
     const question = text.trim();
-    if (!question || loading || agentRunning) return;
+    if (!question || busy) return;
 
     addMessage({ role: 'user', content: question, voice: fromVoice });
     setInput('');
 
-    if (modeRef.current === 'do') doTask(question);
+    // Agent ne sawaal poocha tha: ye uska jawab hai, seedha Do mein bhejo
+    if (agent.pending) {
+      changeMode('do');
+      doTask(question);
+      return;
+    }
+
+    // Warna har query se pehle poocho: Ask (jawab do) ya Do (page pe kaam karo)
+    setChoosing(question);
+    if (speakerOnRef.current && canSpeak) speak('Should I answer this, or do it on the page?');
+  }
+
+  async function runAs(next: Mode) {
+    const question = choosing;
+    if (!question) return;
+    setChoosing(null);
+    changeMode(next); // composer ka rang aakhri chune mode jaisa
+    if (canSpeak) stopSpeaking();
+    if (next === 'do') doTask(question);
     else await ask(question);
+  }
+
+  function cancelChoice() {
+    setChoosing(null);
+    // Sawaal wapas text box mein, aur chat se hatao
+    setInput(choosing ?? '');
+    setMessages((prev) => prev.slice(0, -1));
   }
 
   async function toggleMic() {
@@ -323,16 +386,32 @@ function App() {
 
   const placeholder = listening
     ? 'Listening…'
-    : mode === 'do'
-      ? agent.pending
+    : agentRunning
+      ? 'Quick Peek is working on the task… (press Stop to cancel)'
+    : loading
+      ? 'Quick Peek is answering…'
+    : choosing !== null
+      ? 'Pick Ask or Do above…'
+      : agent.pending
         ? "Answer Quick Peek's question…"
-        : 'Tell me what to do on this page…'
-      : 'Enter your query here.';
+        : 'Ask about this page, or tell me what to do…';
 
   return (
     <div className="app">
       <header className="header">
         <span className="header-title">Quick Peek</span>
+        {messages.length > 0 && (
+          <button
+            className={`clear-btn ${confirmClear ? 'confirm' : ''}`}
+            onClick={clearChat}
+            disabled={busy}
+            aria-label={confirmClear ? 'Click again to clear the chat' : 'Clear chat'}
+            title={busy ? 'Wait for the current task to finish' : 'Clear chat'}
+          >
+            <TrashIcon />
+            {confirmClear && <span>Clear chat?</span>}
+          </button>
+        )}
         {IN_OVERLAY && (
           <button className="close-btn" onClick={closeWidget} aria-label="Close Quick Peek" title="Close">
             ×
@@ -343,9 +422,7 @@ function App() {
       <main className="messages">
         {messages.length === 0 && (
           <p className="empty">
-            {mode === 'do'
-              ? <>Tell me what to do on this page.<br />e.g. “Search for wireless mouse”</>
-              : 'Ask anything about this page.'}
+            Ask anything about this page, or tell me what to do.<br />e.g. “Search for wireless mouse”
             {canListen && <><br />Type, or tap the mic to speak.</>}
           </p>
         )}
@@ -408,6 +485,22 @@ function App() {
             </div>
           );
         })}
+        {choosing !== null && (
+          <div className="bubble assistant choose">
+            <p>Is this a question, or a task to do on the page?</p>
+            <div className="choose-actions">
+              <button className="choose-ask" onClick={() => runAs('ask')} title="Answer it from this page">
+                Ask
+              </button>
+              <button className="choose-do" onClick={() => runAs('do')} title="Click and type on this page">
+                Do
+              </button>
+              <button className="choose-cancel" onClick={cancelChoice} title="Edit the message">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         {loading && <div className="bubble assistant">Thinking…</div>}
         <div ref={bottomRef} />
       </main>
@@ -419,8 +512,10 @@ function App() {
         </p>
       )}
 
-      <footer className="composer">
+      {/* Mode ke hisaab se rang (Ask = neela, Do = narangi): bhejne se pehle dikhe ki kaunsa mode hai */}
+      <footer className={`composer mode-${mode}`}>
         <textarea
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -431,6 +526,8 @@ function App() {
           }}
           placeholder={placeholder}
           readOnly={listening}
+          // Agent kaam kar raha hai (ya jawab aa raha hai / Ask-Do chunna baaki hai): nayi command nahi
+          disabled={busy}
           rows={2}
         />
         <div className="composer-actions">
@@ -449,6 +546,7 @@ function App() {
             <button
               className={`icon-btn ${speakerOn ? 'on' : ''}`}
               onClick={toggleSpeaker}
+              disabled={busy}
               aria-label={speakerOn ? 'Turn off spoken replies' : 'Read replies aloud'}
               aria-pressed={speakerOn}
               title={speakerOn ? 'Spoken replies: on' : 'Spoken replies: off'}
@@ -456,26 +554,6 @@ function App() {
               {speakerOn ? <SpeakerIcon /> : <SpeakerOffIcon />}
             </button>
           )}
-          <div className="mode-switch" role="group" aria-label="Mode">
-            <button
-              className={mode === 'ask' ? 'active' : ''}
-              onClick={() => changeMode('ask')}
-              disabled={agentRunning}
-              aria-pressed={mode === 'ask'}
-              title="Ask questions about this page"
-            >
-              Ask
-            </button>
-            <button
-              className={mode === 'do' ? 'active' : ''}
-              onClick={() => changeMode('do')}
-              disabled={agentRunning}
-              aria-pressed={mode === 'do'}
-              title="Let Quick Peek click and type on this page"
-            >
-              Do
-            </button>
-          </div>
           <button className="send-btn" onClick={() => send()} disabled={busy || listening || !input.trim()}>
             Send
           </button>

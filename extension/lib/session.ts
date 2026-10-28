@@ -23,7 +23,8 @@ export interface RunRecord {
 export interface AgentState {
   runs: Record<string, RunRecord>;
   // Agent ne user se sawaal poochha: agla "Do" message usi kaam ko aage badhata hai
-  pending: { goal: string; history: AgentStep[]; plan: string[] } | null;
+  // Agent ne user se kuch poocha tha: agla message uska jawab ho sakta hai
+  pending: { goal: string; history: AgentStep[]; plan: string[]; question?: string; at?: number } | null;
 }
 
 export const chatKey = (tabId: number) => `qp:chat:${tabId}`;
@@ -38,4 +39,5 @@ export type BgMessage =
   | { type: 'qp:agent:start'; tabId: number; runId: string; instruction: string }
   | { type: 'qp:agent:confirm'; tabId: number; ok: boolean }
   | { type: 'qp:agent:stop'; tabId: number }
+  | { type: 'qp:agent:clear'; tabId: number }
   | { type: 'qp:overlay:close'; tabId: number };

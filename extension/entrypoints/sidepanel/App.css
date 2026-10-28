@@ -121,6 +121,19 @@ body {
 }
 
 /* Message input */
+/* Mode ke rang: Ask = neela, Do = narangi */
+.composer.mode-ask {
+  --mode-from: #4f8cff;
+  --mode-to: #2563eb;
+  --mode-ring: rgba(79, 140, 255, 0.18);
+}
+
+.composer.mode-do {
+  --mode-from: #ff9f43;
+  --mode-to: #ea580c;
+  --mode-ring: rgba(255, 159, 67, 0.18);
+}
+
 .composer {
   display: flex;
   flex-direction: column;
@@ -137,7 +150,7 @@ body {
   resize: none;
   padding: 12px 14px;
   border-radius: 14px;
-  border: 1px solid #303246;
+  border: 1px solid var(--mode-to, #303246);
   background: #171925;
   color: #f2f3fa;
   font: inherit;
@@ -157,13 +170,18 @@ body {
   margin-left: auto;
 }
 
+.composer textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .composer textarea::placeholder {
   color: #85899e;
 }
 
 .composer textarea:focus {
-  border-color: #8175ff;
-  box-shadow: 0 0 0 3px rgba(129, 117, 255, 0.12);
+  border-color: var(--mode-from, #8175ff);
+  box-shadow: 0 0 0 3px var(--mode-ring, rgba(129, 117, 255, 0.12));
 }
 
 .composer button {
@@ -271,29 +289,44 @@ body {
   cursor: pointer;
 }
 
-/* Ask / Do switch */
-.mode-switch {
-  display: flex;
-  padding: 2px;
-  border-radius: 10px;
-  background: #171925;
-  border: 1px solid #303246;
+.composer .send-btn {
+  background: linear-gradient(135deg, var(--mode-from, #8175ff), var(--mode-to, #5c4de8));
+  transition: background 0.2s;
 }
 
-.composer .mode-switch button {
-  min-width: 0;
-  height: 30px;
-  padding: 0 12px;
+/* Ask ya Do: har query se pehle */
+.bubble.choose p {
+  margin: 0 0 8px;
+}
+
+.choose-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.choose-actions button {
+  padding: 5px 16px;
+  border: none;
   border-radius: 8px;
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.choose-ask {
+  background: linear-gradient(135deg, #4f8cff, #2563eb);
+}
+
+.choose-do {
+  background: linear-gradient(135deg, #ff9f43, #ea580c);
+}
+
+.choose-actions .choose-cancel {
   background: transparent;
   color: #a3a7bb;
-  font-size: 13px;
-  box-shadow: none;
-}
-
-.composer .mode-switch button.active {
-  background: linear-gradient(135deg, #8175ff, #5c4de8);
-  color: #fff;
+  border: 1px solid #303246;
 }
 
 /* Agent run */
@@ -515,7 +548,78 @@ body {
   line-height: 1;
 }
 
+.clear-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0 8px;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #c9cbe0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.clear-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.clear-btn.confirm {
+  color: #ffb4b4;
+  border-color: rgba(255, 107, 107, 0.5);
+  background: rgba(255, 107, 107, 0.12);
+}
+
+.clear-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .close-btn:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* Panel crash hone pe (ErrorBoundary) */
+.crash {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100vh;
+  padding: 24px;
+  text-align: center;
+  color: #e8eaf2;
+  background: #0b0d14;
+}
+
+.crash-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.crash-detail {
+  margin: 0;
+  max-width: 320px;
+  color: #a3a7bb;
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.crash button {
+  margin-top: 6px;
+  height: 34px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #8175ff, #5c4de8);
+  color: #fff;
+  cursor: pointer;
 }

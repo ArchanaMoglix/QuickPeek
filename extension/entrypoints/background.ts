@@ -1,6 +1,6 @@
 import { RESTRICTED } from '@/lib/extract';
-import { hideOverlay, showOverlay } from '@/lib/overlay';
-import { answerConfirm, forgetTab, startRun, stopRun } from '@/lib/agent/manager';
+import { OVERLAY_ID, hideOverlay, showOverlay } from '@/lib/overlay';
+import { answerConfirm, forgetTab, startRun, stopRun, clearAgent } from '@/lib/agent/manager';
 import { OPEN_TABS_KEY, type BgMessage } from '@/lib/session';
 
 export default defineBackground(() => {
@@ -26,6 +26,22 @@ export default defineBackground(() => {
     stopRun(tabId); // widget band = kaam bhi band
     await hideOverlay(tabId);
   }
+
+  // Extension reload/update hua (dev mode mein har code change pe bhi): pehle se khule cards ka
+  // andar wala page mar jaata hai aur sirf kaala dabba bachta hai. Aise dabbe hata do.
+  browser.runtime.onInstalled.addListener(async () => {
+    const tabs = await browser.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab.id || !tab.url || RESTRICTED.test(tab.url)) continue;
+      browser.scripting
+        .executeScript({
+          target: { tabId: tab.id },
+          func: (id: string) => document.getElementById(id)?.remove(),
+          args: [OVERLAY_ID],
+        })
+        .catch(() => {}); // jin pages pe script nahi chal sakti
+    }
+  });
 
   // Toolbar icon: overlay khol/band karo, sirf isi tab mein. Naye tab mein band hi rehta hai.
   browser.action.onClicked.addListener((tab) => {
@@ -72,6 +88,9 @@ export default defineBackground(() => {
         break;
       case 'qp:agent:stop':
         stopRun(msg.tabId);
+        break;
+      case 'qp:agent:clear':
+        clearAgent(msg.tabId).catch(console.error);
         break;
       case 'qp:overlay:close':
         close(msg.tabId).catch(console.error);

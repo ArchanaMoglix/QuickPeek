@@ -5,6 +5,7 @@ export interface PageContent {
   selection: string; // user ne jo text select kiya ho
   imageCoverage: number; // screen ka kitna hissa (0–1) images se dhaka hai: model routing ke liye
   images: PageImage[]; // poore page ki badi images (screen ke bahar wali bhi)
+  html?: string; // sawaal HTML ke baare mein ho (class, id...): elements ke asli tags + attributes
 }
 
 export interface PageImage {
@@ -16,7 +17,7 @@ export interface PageImage {
 }
 
 // ⚠️ Ye function website ke andar chalta hai. Bahar ka kuch bhi use mat karna.
-function extractPage(): PageContent {
+function extractPage(question = ''): PageContent {
   const clean = (s: string) =>
     s.replace(/[ \t]+\n/g, '\n')   // line ke end ke extra spaces
      .replace(/\n{3,}/g, '\n\n')   // bahut saari khaali lines
@@ -82,8 +83,54 @@ function extractPage(): PageContent {
     });
   }
 
+  // Sawaal HTML/DOM ke baare mein (class, id, attribute, selector...)? To elements ke asli
+  // opening tags bhejo, warna model class name andaaze se bana deta hai
+  const HTML_Q = /\b(class|classes|classname|ids?|attributes?|attr|selectors?|xpath|html|dom|tags?|markup|outerhtml|href|src|data-[\w-]+|aria-[\w-]+)\b/i;
+  let html: string | undefined;
+  if (HTML_Q.test(question)) {
+    const SELECTOR = 'a[href], button, input:not([type=hidden]), textarea, select, summary, label, img, ' +
+      '[role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [onclick], [contenteditable=true]';
+    const one = (t: string | null | undefined) => (t ?? '').replace(/\s+/g, ' ').trim();
+    const clip = (t: string, n: number) => (t.length > n ? t.slice(0, n) + '…' : t);
+    const SKIP_WORDS = new Set(('class classes classname id ids attribute attributes attr selector selectors xpath html dom tag tags ' +
+      'markup href src element elements button buttons link links input inputs the of for and get give me what which is are ' +
+      'first second third last product products item items page this that tell show find kya hai ka ki ke batao').split(' '));
+    const qWords = question.toLowerCase().split(/[^\p{L}\p{N}-]+/u).filter((w) => w.length >= 2 && !SKIP_WORDS.has(w));
+
+    const rows: { label: string; line: string }[] = [];
+    for (const el of Array.from(document.body.querySelectorAll<HTMLElement>(SELECTOR))) {
+      if (el.closest('#__quickpeek_overlay, #__quickpeek_marks')) continue;
+      if (!el.getClientRects().length) continue; // display:none
+      const label = one(el.getAttribute('aria-label')) || one(el.innerText) || one(el.getAttribute('title')) ||
+        one(el.getAttribute('placeholder')) || one(el.getAttribute('alt')) || one((el as HTMLInputElement).value);
+      const attrs = Array.from(el.attributes)
+        .filter((a) => a.name !== 'style' && !a.name.startsWith('on') && !a.name.startsWith('data-qp') && !a.name.startsWith('_ng'))
+        .slice(0, 10)
+        .map((a) => (a.value === '' ? a.name : `${a.name}="${clip(one(a.value), 120)}"`));
+      // Kis cheez (jaise product card) ke andar hai: upar ke parent ka pehla alag text
+      let inside = '';
+      for (let p = el.parentElement, i = 0; p && p !== document.body && i < 8; p = p.parentElement, i++) {
+        const lines = (p.innerText ?? '').split('\n').map(one).filter((l) => l && l !== label);
+        if (lines.length) { inside = clip(lines[0]!, 80); break; }
+      }
+      const tag = el.tagName.toLowerCase();
+      rows.push({
+        label: `${label} ${inside}`.toLowerCase(),
+        line: `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>${clip(label, 60)}</${tag}>${inside ? `   (inside: "${inside}")` : ''}`,
+      });
+    }
+    // Sawaal ke shabd (jaise "buy now") jin elements mein hain, sirf wo; warna shuru ke elements
+    const hits = qWords.length ? rows.filter((r) => qWords.some((w) => r.label.includes(w))) : [];
+    const pick = hits.length ? hits : rows;
+    html = '';
+    pick.forEach((r, i) => {
+      if (html!.length < 15000) html += `#${i + 1} ${r.line}\n`;
+    });
+    html = `${hits.length ? `${hits.length} elements matching the question` : `first elements of ${rows.length}`}, in page order (top to bottom):\n${html}`;
+  }
 
   return {
+    html,
     title: document.title,
     url: location.href,
     text: clean(root),
@@ -97,7 +144,7 @@ function extractPage(): PageContent {
 export const RESTRICTED =
   /^(chrome|edge|about|chrome-extension|devtools|view-source):|^https:\/\/chromewebstore\.google\.com/;
 
-export async function getPageContent(): Promise<PageContent> {
+export async function getPageContent(question = ''): Promise<PageContent> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
 
 if (!tab?.id || !tab.url) throw new Error('No active tab found.');
@@ -108,6 +155,7 @@ if (RESTRICTED.test(tab.url)) {
   const [res] = await browser.scripting.executeScript({
     target: { tabId: tab.id },
     func: extractPage,
+    args: [question],
   });
 
  if (!res?.result) throw new Error('Could not read the page content.');
